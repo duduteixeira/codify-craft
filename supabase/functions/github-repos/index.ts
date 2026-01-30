@@ -6,6 +6,50 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// Decrypt token using the same method as github-oauth
+async function getEncryptionKey(): Promise<CryptoKey> {
+  const ENCRYPTION_SECRET = Deno.env.get("ENCRYPTION_SECRET") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.slice(0, 32);
+  if (!ENCRYPTION_SECRET || ENCRYPTION_SECRET.length < 32) {
+    throw new Error("Invalid encryption key");
+  }
+  
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(ENCRYPTION_SECRET.slice(0, 32));
+  
+  return await crypto.subtle.importKey(
+    "raw",
+    keyData,
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"]
+  );
+}
+
+async function decryptToken(encryptedToken: string): Promise<string> {
+  try {
+    const key = await getEncryptionKey();
+    
+    // Decode base64
+    const combined = Uint8Array.from(atob(encryptedToken), c => c.charCodeAt(0));
+    
+    // Extract IV and encrypted data
+    const iv = combined.slice(0, 12);
+    const data = combined.slice(12);
+    
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      data
+    );
+    
+    const decoder = new TextDecoder();
+    return decoder.decode(decrypted);
+  } catch {
+    // If decryption fails, assume it's a plain text token (backwards compatibility)
+    return encryptedToken;
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -26,7 +70,7 @@ serve(async (req) => {
     // Get user's GitHub access token
     const { data: integration, error: intError } = await supabase
       .from("git_integrations")
-      .select("access_token_encrypted, account_username")
+      .select("id, access_token_encrypted, account_username")
       .eq("user_id", user_id)
       .eq("provider", "github")
       .maybeSingle();
@@ -38,7 +82,8 @@ serve(async (req) => {
       );
     }
 
-    const accessToken = integration.access_token_encrypted;
+    // Decrypt the token
+    const accessToken = await decryptToken(integration.access_token_encrypted);
     const username = integration.account_username;
 
     // List repositories
@@ -50,6 +95,15 @@ serve(async (req) => {
           "User-Agent": "ActivityForge",
         },
       });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("GitHub API error:", response.status, errorText);
+        return new Response(
+          JSON.stringify({ error: "Failed to fetch repositories. Your token may have expired." }),
+          { status: response.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
       const repos = await response.json();
       
@@ -101,7 +155,7 @@ serve(async (req) => {
           .from("git_repositories")
           .insert({
             custom_activity_id: activity_id,
-            git_integration_id: integration_id,
+            git_integration_id: integration_id || integration.id,
             provider: "github",
             repository_id: repo.id.toString(),
             repository_name: repo.name,

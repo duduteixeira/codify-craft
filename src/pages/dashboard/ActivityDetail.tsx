@@ -23,6 +23,8 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useSubscription } from "@/hooks/useSubscription";
+import { downloadActivityZip } from "@/lib/downloadZip";
 
 const getStatusBadge = (status: string) => {
   const styles: Record<string, string> = {
@@ -43,6 +45,7 @@ const ActivityDetail = () => {
   const { id } = useParams();
   const { user } = useAuth();
   const { toast } = useToast();
+  const { incrementGenerationCount, canGenerateAI } = useSubscription();
   const [activeTab, setActiveTab] = useState<string>("overview");
   const [copied, setCopied] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -51,7 +54,6 @@ const ActivityDetail = () => {
   const [gitRepo, setGitRepo] = useState<any>(null);
   const [deployment, setDeployment] = useState<any>(null);
   const [codeFile, setCodeFile] = useState<string>("server.js");
-
   useEffect(() => {
     if (id && user) {
       loadActivity();
@@ -84,6 +86,15 @@ const ActivityDetail = () => {
       return;
     }
 
+    if (!canGenerateAI()) {
+      toast({ 
+        title: "Limit reached", 
+        description: "You've reached your AI generation limit. Please upgrade your plan.", 
+        variant: "destructive" 
+      });
+      return;
+    }
+
     setGenerating(true);
     try {
       const { data, error } = await supabase.functions.invoke("generate-code", {
@@ -95,6 +106,9 @@ const ActivityDetail = () => {
 
       if (error) throw error;
       if (data.error) throw new Error(data.error);
+
+      // Increment generation count
+      await incrementGenerationCount();
 
       // Update activity with generated code
       const { error: updateError } = await supabase
@@ -127,23 +141,22 @@ const ActivityDetail = () => {
     setTimeout(() => setCopied(null), 2000);
   };
 
-  const downloadZip = async () => {
+  const handleDownloadZip = async () => {
     if (!activity?.nodejs_code) return;
     
-    // Create a simple download of the files as JSON (in production, use JSZip)
-    const files = {
-      ...activity.nodejs_code,
-      "public/config.json": JSON.stringify(activity.config_json, null, 2),
-      ...(activity.javascript_code || {}),
-    };
-    
-    const blob = new Blob([JSON.stringify(files, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${activity.name.toLowerCase().replace(/\s+/g, "-")}-files.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      await downloadActivityZip({
+        name: activity.name,
+        config_json: activity.config_json,
+        nodejs_code: activity.nodejs_code,
+        javascript_code: activity.javascript_code,
+        extracted_requirements: activity.extracted_requirements,
+      });
+      toast({ title: "Download started", description: "Your ZIP file is being downloaded." });
+    } catch (error) {
+      console.error("Download error:", error);
+      toast({ title: "Download failed", description: "Failed to generate ZIP file", variant: "destructive" });
+    }
   };
 
   const pushToGitHub = async () => {
@@ -247,7 +260,7 @@ const ActivityDetail = () => {
                   <RefreshCw className={`h-4 w-4 mr-2 ${generating ? "animate-spin" : ""}`} />
                   Regenerate
                 </Button>
-                <Button variant="outline" size="sm" onClick={downloadZip}>
+                <Button variant="outline" size="sm" onClick={handleDownloadZip}>
                   <Download className="h-4 w-4 mr-2" />
                   Download
                 </Button>
@@ -341,7 +354,7 @@ const ActivityDetail = () => {
                     <div className="rounded-xl border border-border bg-card p-6">
                       <div className="flex items-center justify-between mb-4">
                         <h3 className="font-semibold">Generated Files</h3>
-                        <Button variant="outline" size="sm" onClick={downloadZip}>
+                        <Button variant="outline" size="sm" onClick={handleDownloadZip}>
                           <Download className="h-4 w-4 mr-2" />
                           Download ZIP
                         </Button>
