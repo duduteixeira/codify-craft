@@ -1,6 +1,8 @@
-import { ReactNode, useState } from "react";
+import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import {
   Zap,
   LayoutDashboard,
@@ -15,6 +17,8 @@ import {
   Bell,
   Search,
   User,
+  CreditCard,
+  Rocket,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -26,16 +30,36 @@ const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { name: "Activities", href: "/dashboard/activities", icon: FolderKanban },
   { name: "Git Connections", href: "/dashboard/git", icon: GitBranch },
-  { name: "Analytics", href: "/dashboard/analytics", icon: BarChart3 },
+  { name: "Deploy Providers", href: "/dashboard/settings/deploy", icon: Rocket },
+  { name: "Billing", href: "/dashboard/settings/billing", icon: CreditCard },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 
 const DashboardLayout = ({ children }: DashboardLayoutProps) => {
   const location = useLocation();
   const navigate = useNavigate();
+  const { user, signOut } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
+  const [profile, setProfile] = useState<{ full_name: string | null; company_name: string | null } | null>(null);
+  const [subscription, setSubscription] = useState<{ plan: string; custom_activities_count: number } | null>(null);
 
-  const handleLogout = () => {
+  useEffect(() => {
+    if (user) {
+      loadUserData();
+    }
+  }, [user]);
+
+  const loadUserData = async () => {
+    const [profileRes, subRes] = await Promise.all([
+      supabase.from("profiles").select("full_name, company_name").eq("user_id", user?.id).maybeSingle(),
+      supabase.from("user_subscriptions").select("plan, custom_activities_count").eq("user_id", user?.id).maybeSingle(),
+    ]);
+    if (profileRes.data) setProfile(profileRes.data);
+    if (subRes.data) setSubscription(subRes.data);
+  };
+
+  const handleLogout = async () => {
+    await signOut();
     navigate("/");
   };
 
@@ -115,8 +139,10 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
             </div>
             {!collapsed && (
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-sidebar-foreground truncate">John Doe</p>
-                <p className="text-xs text-sidebar-foreground/60 truncate">john@company.com</p>
+                <p className="text-sm font-medium text-sidebar-foreground truncate">
+                  {profile?.full_name || user?.email?.split("@")[0] || "User"}
+                </p>
+                <p className="text-xs text-sidebar-foreground/60 truncate">{user?.email}</p>
               </div>
             )}
             <button
@@ -153,9 +179,9 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
               </button>
               <div className="h-8 w-px bg-border" />
               <div className="flex items-center gap-3">
-                <span className="text-sm text-muted-foreground">Pro Plan</span>
+                <span className="text-sm text-muted-foreground capitalize">{subscription?.plan || "Free"} Plan</span>
                 <div className="px-2 py-1 rounded bg-primary/10 text-primary text-xs font-medium">
-                  3/50 Activities
+                  {subscription?.custom_activities_count || 0}/{subscription?.plan === "pro" ? 50 : subscription?.plan === "enterprise" ? "∞" : 3} Activities
                 </div>
               </div>
             </div>

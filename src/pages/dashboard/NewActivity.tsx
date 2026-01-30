@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import DashboardLayout from "@/components/dashboard/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -38,6 +40,7 @@ const examplePrompts = [
 
 const NewActivity = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { toast } = useToast();
   const [step, setStep] = useState<"prompt" | "review" | "generating">("prompt");
   const [loading, setLoading] = useState(false);
@@ -61,45 +64,70 @@ const NewActivity = () => {
     setLoading(true);
     setStep("generating");
 
-    // Simulate AI processing
-    setTimeout(() => {
-      setExtractedRequirements({
-        activityName: formData.name || "Custom Activity",
-        activityDescription: "AI-generated custom activity based on your description",
-        category: "custom",
-        inArguments: [
-          { name: "emailAddress", type: "string", source: "{{Contact.Attribute.EmailAddress}}", required: true },
-          { name: "firstName", type: "string", source: "{{Contact.Attribute.FirstName}}", required: false },
-        ],
-        outArguments: [
-          { name: "status", type: "string", description: "Execution status" },
-        ],
-        externalAPIs: [
-          { name: "Slack", baseUrl: "https://hooks.slack.com", authentication: "webhook" },
-        ],
-        executionSteps: [
-          { order: 1, action: "Receive data from Journey Builder", details: "Extract contact information" },
-          { order: 2, action: "Format message payload", details: "Build Slack message with contact data" },
-          { order: 3, action: "Send to Slack webhook", details: "POST request to configured webhook URL" },
-        ],
-        isDecisionSplit: false,
+    try {
+      const { data, error } = await supabase.functions.invoke("generate-activity", {
+        body: {
+          prompt: formData.prompt,
+          activityName: formData.name,
+        },
       });
+
+      if (error) throw error;
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      setExtractedRequirements(data.requirements);
       setStep("review");
+    } catch (error: any) {
+      console.error("Generation error:", error);
+      toast({
+        title: "Generation failed",
+        description: error.message || "Failed to generate requirements. Please try again.",
+        variant: "destructive",
+      });
+      setStep("prompt");
+    } finally {
       setLoading(false);
-    }, 3000);
+    }
   };
 
-  const handleConfirmAndGenerate = () => {
+  const handleConfirmAndGenerate = async () => {
     setLoading(true);
-    
-    // Simulate code generation
-    setTimeout(() => {
+
+    try {
+      // Save activity to database
+      const { data: activity, error } = await supabase
+        .from("custom_activities")
+        .insert({
+          user_id: user?.id,
+          name: extractedRequirements.activityName || formData.name || "Custom Activity",
+          description: extractedRequirements.activityDescription,
+          status: "generated",
+          original_prompt: formData.prompt,
+          extracted_requirements: extractedRequirements,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
       toast({
         title: "Activity Generated!",
         description: "Your Custom Activity is ready. You can now review the code and deploy.",
       });
-      navigate("/dashboard/activities/1");
-    }, 2000);
+      navigate(`/dashboard/activities/${activity.id}`);
+    } catch (error: any) {
+      console.error("Save error:", error);
+      toast({
+        title: "Failed to save",
+        description: error.message || "Failed to save activity. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const applyExample = (prompt: string) => {
@@ -180,7 +208,7 @@ const NewActivity = () => {
                 <div className="absolute bottom-3 right-3">
                   <div className="flex items-center gap-1 text-xs text-muted-foreground">
                     <Sparkles className="h-3 w-3 text-primary" />
-                    <span>Powered by Claude AI</span>
+                    <span>Powered by Lovable AI</span>
                   </div>
                 </div>
               </div>
@@ -285,49 +313,55 @@ const NewActivity = () => {
                   <p className="font-medium capitalize">{extractedRequirements.category}</p>
                 </div>
 
-                <div>
-                  <Label className="text-xs text-muted-foreground mb-2 block">Input Arguments</Label>
-                  <div className="space-y-1">
-                    {extractedRequirements.inArguments.map((arg: any) => (
-                      <div key={arg.name} className="flex items-center gap-2 text-sm">
-                        <span className="font-code text-primary">{arg.name}</span>
-                        <span className="text-muted-foreground">({arg.type})</span>
-                        {arg.required && (
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">required</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <Label className="text-xs text-muted-foreground mb-2 block">External APIs</Label>
-                  <div className="space-y-1">
-                    {extractedRequirements.externalAPIs.map((api: any) => (
-                      <div key={api.name} className="flex items-center gap-2 text-sm">
-                        <span className="font-medium">{api.name}</span>
-                        <span className="text-muted-foreground">— {api.baseUrl}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <Label className="text-xs text-muted-foreground mb-2 block">Execution Steps</Label>
-                  <div className="space-y-2">
-                    {extractedRequirements.executionSteps.map((step: any) => (
-                      <div key={step.order} className="flex items-start gap-3 text-sm">
-                        <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center flex-shrink-0">
-                          {step.order}
-                        </span>
-                        <div>
-                          <p className="font-medium">{step.action}</p>
-                          <p className="text-muted-foreground">{step.details}</p>
+                {extractedRequirements.inArguments?.length > 0 && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground mb-2 block">Input Arguments</Label>
+                    <div className="space-y-1">
+                      {extractedRequirements.inArguments.map((arg: any, idx: number) => (
+                        <div key={idx} className="flex items-center gap-2 text-sm">
+                          <span className="font-code text-primary">{arg.name}</span>
+                          <span className="text-muted-foreground">({arg.type})</span>
+                          {arg.required && (
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">required</span>
+                          )}
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
+                )}
+
+                {extractedRequirements.externalAPIs?.length > 0 && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground mb-2 block">External APIs</Label>
+                    <div className="space-y-1">
+                      {extractedRequirements.externalAPIs.map((api: any, idx: number) => (
+                        <div key={idx} className="flex items-center gap-2 text-sm">
+                          <span className="font-medium">{api.name}</span>
+                          <span className="text-muted-foreground">— {api.baseUrl || api.authentication}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {extractedRequirements.executionSteps?.length > 0 && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground mb-2 block">Execution Steps</Label>
+                    <div className="space-y-2">
+                      {extractedRequirements.executionSteps.map((step: any) => (
+                        <div key={step.order} className="flex items-start gap-3 text-sm">
+                          <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center flex-shrink-0">
+                            {step.order}
+                          </span>
+                          <div>
+                            <p className="font-medium">{step.action}</p>
+                            <p className="text-muted-foreground">{step.details}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex items-center gap-2 pt-2">
                   <span className="text-sm text-muted-foreground">Decision Split:</span>
@@ -346,12 +380,12 @@ const NewActivity = () => {
                 {loading ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Generating Code...
+                    Saving...
                   </>
                 ) : (
                   <>
                     <Code2 className="h-4 w-4" />
-                    Generate Code
+                    Save Activity
                   </>
                 )}
               </Button>
@@ -370,7 +404,7 @@ const NewActivity = () => {
             </div>
             <h3 className="text-xl font-semibold mb-2">Analyzing your requirements...</h3>
             <p className="text-muted-foreground mb-4">
-              Claude AI is extracting structured requirements from your description
+              AI is extracting structured requirements from your description
             </p>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
