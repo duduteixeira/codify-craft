@@ -1,14 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Zap, ArrowLeft, Github, Mail, Eye, EyeOff, Building2, User } from "lucide-react";
+import { Zap, ArrowLeft, Github, Mail, Eye, EyeOff, Building2, User, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
 
 const Signup = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user, signUp } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
@@ -18,19 +20,42 @@ const Signup = () => {
     password: "",
   });
 
+  // Redirect if already logged in
+  useEffect(() => {
+    if (user) {
+      navigate("/dashboard");
+    }
+  }, [user, navigate]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
-    // Simulate signup
-    setTimeout(() => {
+    const { error } = await signUp(
+      formData.email,
+      formData.password,
+      formData.fullName,
+      formData.company
+    );
+
+    if (error) {
+      let message = error.message;
+      if (error.message?.includes("already registered")) {
+        message = "An account with this email already exists. Please sign in instead.";
+      }
+      toast({
+        title: "Signup failed",
+        description: message,
+        variant: "destructive",
+      });
+      setLoading(false);
+    } else {
       toast({
         title: "Account created!",
-        description: "Welcome to ActivityForge. Let's build something amazing.",
+        description: "Please check your email to verify your account.",
       });
-      navigate("/dashboard");
-      setLoading(false);
-    }, 1000);
+      navigate("/auth/login");
+    }
   };
 
   return (
@@ -129,7 +154,6 @@ const Signup = () => {
                   className="pl-10"
                   value={formData.company}
                   onChange={(e) => setFormData({ ...formData, company: e.target.value })}
-                  required
                 />
               </div>
             </div>
@@ -161,7 +185,14 @@ const Signup = () => {
             </div>
 
             <Button type="submit" variant="gradient" className="w-full" disabled={loading}>
-              {loading ? "Creating account..." : "Create account"}
+              {loading ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Creating account...
+                </>
+              ) : (
+                "Create account"
+              )}
             </Button>
           </form>
 
