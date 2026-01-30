@@ -7,8 +7,20 @@ const corsHeaders = {
 };
 
 serve(async (req) => {
+  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
+  }
+
+  // Only accept POST requests
+  if (req.method !== "POST") {
+    return new Response(
+      JSON.stringify({
+        error: "Method not allowed",
+        message: "This endpoint only accepts POST requests with a JSON body containing 'token' and 'user_id'"
+      }),
+      { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 
   try {
@@ -22,12 +34,41 @@ serve(async (req) => {
       );
     }
 
-    const body = await req.json();
+    // Parse body safely
+    let body;
+    try {
+      const text = await req.text();
+      if (!text || text.trim() === "") {
+        return new Response(
+          JSON.stringify({ error: "Request body is empty. Please provide 'token' and 'user_id' in JSON format." }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      body = JSON.parse(text);
+    } catch (parseError) {
+      return new Response(
+        JSON.stringify({ error: "Invalid JSON in request body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const { token, user_id } = body;
 
     if (!token) {
       return new Response(
         JSON.stringify({ error: "Personal Access Token is required" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate token format
+    const trimmedToken = token.trim();
+    if (!trimmedToken.startsWith("ghp_") && !trimmedToken.startsWith("github_pat_")) {
+      return new Response(
+        JSON.stringify({
+          error: "Invalid token format",
+          details: "GitHub tokens should start with 'ghp_' (classic) or 'github_pat_' (fine-grained). Please check your token."
+        }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -42,7 +83,7 @@ serve(async (req) => {
     // Validate token by fetching user info from GitHub
     const userResponse = await fetch("https://api.github.com/user", {
       headers: {
-        "Authorization": `Bearer ${token}`,
+        "Authorization": `Bearer ${trimmedToken}`,
         "Accept": "application/vnd.github+json",
         "User-Agent": "ActivityForge",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -52,8 +93,22 @@ serve(async (req) => {
     if (!userResponse.ok) {
       const errorText = await userResponse.text();
       console.error("GitHub API error:", userResponse.status, errorText);
+
+      let errorMessage = "Failed to validate GitHub token.";
+      if (userResponse.status === 401) {
+        errorMessage = "Invalid or expired token. Please generate a new Personal Access Token with 'repo' and 'user:email' scopes.";
+      } else if (userResponse.status === 403) {
+        errorMessage = "Token doesn't have required permissions. Please ensure your token has 'repo' and 'user:email' scopes.";
+      } else if (userResponse.status === 404) {
+        errorMessage = "GitHub API not reachable. Please try again later.";
+      }
+
       return new Response(
-        JSON.stringify({ error: "Invalid token or GitHub API error. Please check your token and try again." }),
+        JSON.stringify({
+          error: errorMessage,
+          github_status: userResponse.status,
+          details: "Make sure your token starts with 'ghp_' (classic) or 'github_pat_' (fine-grained)"
+        }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -83,7 +138,7 @@ serve(async (req) => {
       const { error: updateError } = await supabase
         .from("git_integrations")
         .update({
-          access_token_encrypted: token, // In production, encrypt this
+          access_token_encrypted: trimmedToken, // In production, encrypt this
           account_username: githubUser.login,
           connected_at: new Date().toISOString(),
         })
@@ -103,7 +158,7 @@ serve(async (req) => {
         .insert({
           user_id,
           provider: "github",
-          access_token_encrypted: token,
+          access_token_encrypted: trimmedToken, // In production, encrypt this
           account_username: githubUser.login,
         });
 

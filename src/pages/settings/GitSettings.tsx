@@ -94,9 +94,20 @@ const GitSettings = () => {
       
       await loadIntegrations();
     } catch (error: any) {
+      console.error("GitHub connection error:", error);
+
+      // Extract detailed error message
+      let errorDescription = "Failed to connect GitHub";
+      if (error.message) {
+        errorDescription = error.message;
+      }
+      if (error.details) {
+        errorDescription += ` ${error.details}`;
+      }
+
       toast({
         title: "Connection failed",
-        description: error.message || "Failed to connect GitHub",
+        description: errorDescription,
         variant: "destructive",
       });
     } finally {
