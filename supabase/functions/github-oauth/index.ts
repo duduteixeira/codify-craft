@@ -77,6 +77,17 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // Handle GET requests (e.g., when clicking the link directly)
+  if (req.method === "GET") {
+    return new Response(
+      JSON.stringify({ 
+        error: "This endpoint requires a POST request with a JSON body containing 'token' and 'user_id'.",
+        usage: "POST { token: 'your-github-pat', user_id: 'your-user-id' }"
+      }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -88,7 +99,24 @@ serve(async (req) => {
       );
     }
 
-    const body = await req.json();
+    // Parse request body with error handling
+    let body;
+    try {
+      const text = await req.text();
+      if (!text || text.trim() === "") {
+        return new Response(
+          JSON.stringify({ error: "Request body is empty. Please provide 'token' and 'user_id'." }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      body = JSON.parse(text);
+    } catch (parseError) {
+      return new Response(
+        JSON.stringify({ error: "Invalid JSON in request body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const { token, user_id, action } = body;
 
     // Handle token retrieval for other functions
