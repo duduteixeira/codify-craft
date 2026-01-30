@@ -5,13 +5,117 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// ============================================================================
+// SFMC RULES - Injected into every prompt
+// ============================================================================
+const SFMC_RULES = `
+## SFMC Custom Activity Rules (MANDATORY)
+
+You MUST follow these rules exactly. Violation will cause the activity to fail.
+
+### config.json Rules
+1. workflowApiVersion MUST be "1.1"
+2. type MUST be "REST" for standard activities or "RestDecision" for decision splits
+3. All URLs must use {{BASE_URL}} placeholder
+4. arguments.execute.inArguments must use Journey Builder syntax: {{Contact.Attribute.FieldName}}
+5. outcomes are REQUIRED for RestDecision type and MUST have at least 2 outcomes
+6. Each outcome MUST have: key (lowercase_snake_case), metaData.label, and arguments.branchResult
+
+### Server Rules (Node.js)
+1. Express server MUST implement POST endpoints: /execute, /save, /publish, /validate
+2. /execute MUST return valid JSON with outArguments or branchResult
+3. For RestDecision, /execute MUST return { branchResult: "outcome_key" }
+4. NEVER hardcode API keys - use environment variables
+5. Include proper error handling and logging
+
+### Client Rules (customActivity.js)
+1. MUST use Postmonger for Journey Builder communication
+2. MUST handle: initActivity, clickedNext, clickedBack events
+3. MUST call connection.trigger('updateActivity', payload) to save
+4. MUST set metaData.isConfigured = true when configuration is complete
+
+### DO NOT
+- Do not invent field names not specified in requirements
+- Do not use deprecated API versions
+- Do not hardcode any credentials or API keys
+- Do not guess about SFMC data binding syntax
+`;
+
+// ============================================================================
+// EXTRACTION SCHEMA - Strict contract for AI output
+// ============================================================================
+const EXTRACTION_SCHEMA = `
+## Required Output Schema
+
+Return a JSON object with this EXACT structure:
+
+{
+  "activityName": "string (max 50 chars)",
+  "activityDescription": "string (max 200 chars)",
+  "category": "message" | "customer" | "flow" | "custom",
+  "inArguments": [
+    {
+      "name": "string (valid JS identifier, camelCase)",
+      "type": "string" | "number" | "boolean",
+      "source": "Contact.Attribute.FieldName",
+      "required": true | false,
+      "description": "string"
+    }
+  ],
+  "outArguments": [
+    {
+      "name": "string (valid JS identifier)",
+      "type": "string" | "number" | "boolean",
+      "description": "string"
+    }
+  ],
+  "externalAPIs": [
+    {
+      "name": "string",
+      "baseUrl": "string (optional)",
+      "authentication": "none" | "api-key" | "oauth" | "webhook" | "bearer",
+      "envVarName": "string (UPPERCASE_WITH_UNDERSCORES)"
+    }
+  ],
+  "configurationSteps": [
+    {
+      "label": "string",
+      "fields": [
+        {
+          "name": "string (valid JS identifier)",
+          "type": "text" | "textarea" | "select" | "checkbox" | "number" | "url",
+          "label": "string",
+          "placeholder": "string (optional)",
+          "required": true | false,
+          "options": [{"value": "string", "label": "string"}]
+        }
+      ]
+    }
+  ],
+  "isDecisionSplit": true | false,
+  "outcomes": [
+    {
+      "key": "lowercase_snake_case",
+      "label": "Human Readable Label",
+      "condition": "Description of when this outcome triggers"
+    }
+  ],
+  "executionSteps": [
+    {
+      "order": 1,
+      "action": "string",
+      "details": "string"
+    }
+  ]
+}
+`;
+
 interface GenerateRequest {
   prompt: string;
   activityName?: string;
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -35,37 +139,27 @@ serve(async (req) => {
       );
     }
 
-    const systemPrompt = `You are an expert in Salesforce Marketing Cloud Journey Builder Custom Activities.
-Your task is to analyze a user's natural language description and extract structured requirements.
+    // Build the prompt with schema and rules
+    const systemPrompt = `You are an expert Salesforce Marketing Cloud Custom Activity architect.
+Your task is to analyze a user's natural language description and extract precise, structured requirements.
 
-Extract the following information:
-1. Activity name and description
-2. Category (message, customer, flow, or custom)
-3. Input arguments from Journey Builder (with data binding syntax like {{Contact.Attribute.EmailAddress}})
-4. Output arguments to return
-5. External APIs to integrate (with authentication details)
-6. Step-by-step execution logic
-7. Configuration UI fields
-8. Whether it's a decision split (RestDecision) with outcomes
+${SFMC_RULES}
 
-Return ONLY valid JSON following this exact structure:
-{
-  "activityName": "string",
-  "activityDescription": "string",
-  "category": "message|customer|flow|custom",
-  "inArguments": [{"name": "string", "type": "string", "source": "string", "required": boolean}],
-  "outArguments": [{"name": "string", "type": "string", "description": "string"}],
-  "externalAPIs": [{"name": "string", "baseUrl": "string", "authentication": "none|api-key|oauth|webhook"}],
-  "executionSteps": [{"order": number, "action": "string", "details": "string"}],
-  "configurationSteps": [{"label": "string", "fields": [{"name": "string", "type": "string", "label": "string", "required": boolean}]}],
-  "isDecisionSplit": boolean,
-  "outcomes": [{"name": "string", "condition": "string"}]
-}`;
+${EXTRACTION_SCHEMA}
+
+## Critical Instructions
+- Return ONLY valid JSON, no markdown code blocks, no explanations
+- Use exact field names and types as specified in the schema
+- For inArguments source, use proper SFMC data binding syntax: Contact.Attribute.FieldName
+- If the user mentions a decision, split, or multiple paths, set isDecisionSplit to true
+- For decision splits, ALWAYS include at least 2 outcomes
+- Generate realistic, production-ready configurations
+- Every configuration field must have a valid camelCase name`;
 
     const userPrompt = `User Description: ${prompt}
-${activityName ? `Activity Name: ${activityName}` : ''}
+${activityName ? `Suggested Activity Name: ${activityName}` : ''}
 
-Please analyze this and return the structured requirements as JSON.`;
+Analyze this request and return ONLY the structured requirements JSON. No markdown, no explanations.`;
 
     console.log("Calling Lovable AI Gateway for requirement extraction...");
 
@@ -81,7 +175,7 @@ Please analyze this and return the structured requirements as JSON.`;
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
         ],
-        temperature: 0.3,
+        temperature: 0.2, // Low temperature for structured output
       }),
     });
 
@@ -117,20 +211,35 @@ Please analyze this and return the structured requirements as JSON.`;
       );
     }
 
-    // Parse JSON from the response (handle markdown code blocks)
+    // Parse JSON from the response (handle markdown code blocks if present)
     let requirements;
     try {
-      let jsonString = content;
-      if (content.includes("```json")) {
-        jsonString = content.split("```json")[1].split("```")[0].trim();
-      } else if (content.includes("```")) {
-        jsonString = content.split("```")[1].split("```")[0].trim();
+      let jsonString = content.trim();
+      
+      // Remove markdown code blocks if present
+      if (jsonString.includes("```json")) {
+        jsonString = jsonString.split("```json")[1].split("```")[0].trim();
+      } else if (jsonString.includes("```")) {
+        jsonString = jsonString.split("```")[1].split("```")[0].trim();
       }
+      
       requirements = JSON.parse(jsonString);
+      
+      // Validate required fields
+      const validationErrors = validateRequirements(requirements);
+      if (validationErrors.length > 0) {
+        console.warn("Validation warnings:", validationErrors);
+        // Attempt to fix common issues
+        requirements = fixCommonIssues(requirements);
+      }
+      
     } catch (parseError) {
       console.error("Failed to parse AI response as JSON:", parseError, content);
       return new Response(
-        JSON.stringify({ error: "Failed to parse AI response", raw: content }),
+        JSON.stringify({ 
+          error: "Failed to parse AI response. Please try again with a clearer description.",
+          raw: content.substring(0, 500) 
+        }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -149,3 +258,90 @@ Please analyze this and return the structured requirements as JSON.`;
     );
   }
 });
+
+// ============================================================================
+// Validation & Fixing Functions
+// ============================================================================
+
+function validateRequirements(req: any): string[] {
+  const errors: string[] = [];
+  
+  if (!req.activityName) errors.push("Missing activityName");
+  if (!req.activityDescription) errors.push("Missing activityDescription");
+  if (!req.category) errors.push("Missing category");
+  
+  // Validate decision split has outcomes
+  if (req.isDecisionSplit && (!req.outcomes || req.outcomes.length < 2)) {
+    errors.push("Decision split requires at least 2 outcomes");
+  }
+  
+  // Validate inArguments have proper format
+  if (req.inArguments) {
+    for (const arg of req.inArguments) {
+      if (!arg.name || !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(arg.name)) {
+        errors.push(`Invalid inArgument name: ${arg.name}`);
+      }
+    }
+  }
+  
+  // Validate configuration fields
+  if (req.configurationSteps) {
+    for (const step of req.configurationSteps) {
+      if (!step.fields || step.fields.length === 0) {
+        errors.push(`Configuration step "${step.label}" has no fields`);
+      }
+    }
+  }
+  
+  return errors;
+}
+
+function fixCommonIssues(req: any): any {
+  const fixed = { ...req };
+  
+  // Ensure category is valid
+  const validCategories = ["message", "customer", "flow", "custom"];
+  if (!validCategories.includes(fixed.category)) {
+    fixed.category = "custom";
+  }
+  
+  // Fix inArgument sources
+  if (fixed.inArguments) {
+    fixed.inArguments = fixed.inArguments.map((arg: any) => ({
+      ...arg,
+      source: arg.source || `Contact.Attribute.${arg.name}`,
+      type: arg.type || "string",
+      required: arg.required ?? true,
+    }));
+  }
+  
+  // Ensure outcomes for decision splits
+  if (fixed.isDecisionSplit && (!fixed.outcomes || fixed.outcomes.length < 2)) {
+    fixed.outcomes = [
+      { key: "outcome_yes", label: "Yes", condition: "When condition is met" },
+      { key: "outcome_no", label: "No", condition: "When condition is not met" },
+    ];
+  }
+  
+  // Fix outcome keys to be lowercase
+  if (fixed.outcomes) {
+    fixed.outcomes = fixed.outcomes.map((o: any) => ({
+      ...o,
+      key: o.key?.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 
+           o.label?.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') ||
+           'outcome',
+    }));
+  }
+  
+  // Ensure configurationSteps is an array
+  if (!Array.isArray(fixed.configurationSteps)) {
+    fixed.configurationSteps = [];
+  }
+  
+  // Ensure executionSteps is an array
+  if (!Array.isArray(fixed.executionSteps)) {
+    fixed.executionSteps = [];
+  }
+  
+  return fixed;
+}

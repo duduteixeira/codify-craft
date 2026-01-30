@@ -1,88 +1,120 @@
 import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { useSubscription } from "@/hooks/useSubscription";
 import DashboardLayout from "@/components/dashboard/DashboardLayout";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Sparkles,
-  ArrowRight,
+  Zap,
+  GitBranch,
+  Server,
   Code2,
-  Lightbulb,
+  ArrowRight,
+  ArrowLeft,
   Check,
   Loader2,
-  ChevronDown,
-  ChevronUp,
   AlertTriangle,
+  Sparkles,
+  Plus,
+  Trash2,
+  AlertCircle,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { Link } from "react-router-dom";
 
-const examplePrompts = [
-  {
-    title: "Slack Notification",
-    prompt: "I want to send a Slack message when a customer enters the journey. Include their email, name, and the campaign name. Use a webhook to post to a specific channel that the user configures.",
-  },
-  {
-    title: "CRM Sync",
-    prompt: "Create a custom activity that syncs contact data with HubSpot. When a contact enters the journey, update their properties in HubSpot with the latest Marketing Cloud data.",
-  },
-  {
-    title: "SMS via Twilio",
-    prompt: "Send a personalized SMS using Twilio. The message template should be configurable, and include merge fields for first name and order number. Handle delivery status callbacks.",
-  },
-  {
-    title: "Decision Split",
-    prompt: "Create a decision split activity that checks if a customer has made a purchase in the last 30 days by calling our internal API. Return 'Buyer' or 'Non-Buyer' outcomes.",
-  },
-];
+type ProjectType = "custom-activity" | "decision-split";
+type Stack = "node" | "ssjs";
+type WizardStep = "type" | "stack" | "describe" | "configure" | "review" | "generating";
 
-const NewActivity = () => {
+interface Outcome {
+  key: string;
+  label: string;
+  condition: string;
+}
+
+interface ConfigField {
+  name: string;
+  type: "text" | "textarea" | "select" | "number" | "url" | "checkbox";
+  label: string;
+  required: boolean;
+}
+
+const NewActivityWizard = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { toast } = useToast();
-  const { 
-    canCreateActivity, 
-    canGenerateAI, 
-    getRemainingActivities, 
-    getRemainingGenerations,
+  const {
+    canCreateActivity,
+    canGenerateAI,
     incrementActivityCount,
     incrementGenerationCount,
     subscription,
     loading: subscriptionLoading,
   } = useSubscription();
-  const [step, setStep] = useState<"prompt" | "review" | "generating">("prompt");
+
+  const [step, setStep] = useState<WizardStep>("type");
   const [loading, setLoading] = useState(false);
-  const [showTips, setShowTips] = useState(true);
-  const [formData, setFormData] = useState({
-    name: "",
-    prompt: "",
-  });
   const [extractedRequirements, setExtractedRequirements] = useState<any>(null);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
-  const handleGenerate = async () => {
-    if (!formData.prompt.trim()) {
-      toast({
-        title: "Prompt required",
-        description: "Please describe what your Custom Activity should do.",
-        variant: "destructive",
-      });
-      return;
+  // Form state
+  const [projectType, setProjectType] = useState<ProjectType>("custom-activity");
+  const [stack, setStack] = useState<Stack>("node");
+  const [activityName, setActivityName] = useState("");
+  const [description, setDescription] = useState("");
+  const [outcomes, setOutcomes] = useState<Outcome[]>([
+    { key: "outcome_yes", label: "Yes", condition: "When condition is met" },
+    { key: "outcome_no", label: "No", condition: "When condition is not met" },
+  ]);
+  const [configFields, setConfigFields] = useState<ConfigField[]>([]);
+
+  const steps: { key: WizardStep; label: string; icon: any }[] = [
+    { key: "type", label: "Type", icon: Zap },
+    { key: "stack", label: "Stack", icon: Server },
+    { key: "describe", label: "Describe", icon: Sparkles },
+    { key: "configure", label: "Configure", icon: Code2 },
+    { key: "review", label: "Review", icon: Check },
+  ];
+
+  const currentStepIndex = steps.findIndex(s => s.key === step);
+
+  const handleNext = async () => {
+    if (step === "type") {
+      setStep("stack");
+    } else if (step === "stack") {
+      setStep("describe");
+    } else if (step === "describe") {
+      if (!activityName.trim() || !description.trim()) {
+        toast({
+          title: "Required fields",
+          description: "Please enter both activity name and description.",
+          variant: "destructive",
+        });
+        return;
+      }
+      await generateRequirements();
+    } else if (step === "configure") {
+      setStep("review");
+    } else if (step === "review") {
+      await createActivity();
     }
+  };
 
-    if (!canCreateActivity()) {
-      toast({
-        title: "Limit reached",
-        description: "You've reached your activity limit. Please upgrade your plan.",
-        variant: "destructive",
-      });
-      return;
-    }
+  const handleBack = () => {
+    if (step === "stack") setStep("type");
+    else if (step === "describe") setStep("stack");
+    else if (step === "configure") setStep("describe");
+    else if (step === "review") setStep("configure");
+  };
 
+  const generateRequirements = async () => {
     if (!canGenerateAI()) {
       toast({
         title: "Generation limit reached",
@@ -96,24 +128,33 @@ const NewActivity = () => {
     setStep("generating");
 
     try {
+      // Build prompt with type context
+      let prompt = description;
+      if (projectType === "decision-split") {
+        prompt += `\n\nThis is a DECISION SPLIT activity with the following outcomes: ${outcomes.map(o => o.label).join(", ")}`;
+      }
+
       const { data, error } = await supabase.functions.invoke("generate-activity", {
         body: {
-          prompt: formData.prompt,
-          activityName: formData.name,
+          prompt,
+          activityName,
         },
       });
 
       if (error) throw error;
+      if (data.error) throw new Error(data.error);
 
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
-      // Increment generation count
       await incrementGenerationCount();
 
-      setExtractedRequirements(data.requirements);
-      setStep("review");
+      // Merge AI requirements with user selections
+      const requirements = {
+        ...data.requirements,
+        isDecisionSplit: projectType === "decision-split",
+        outcomes: projectType === "decision-split" ? outcomes : undefined,
+      };
+
+      setExtractedRequirements(requirements);
+      setStep("configure");
     } catch (error: any) {
       console.error("Generation error:", error);
       toast({
@@ -121,25 +162,34 @@ const NewActivity = () => {
         description: error.message || "Failed to generate requirements. Please try again.",
         variant: "destructive",
       });
-      setStep("prompt");
+      setStep("describe");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleConfirmAndGenerate = async () => {
+  const createActivity = async () => {
+    if (!canCreateActivity()) {
+      toast({
+        title: "Limit reached",
+        description: "You've reached your activity limit. Please upgrade your plan.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setLoading(true);
 
     try {
-      // Save activity to database
+      // Create activity in database
       const { data: activity, error } = await supabase
         .from("custom_activities")
         .insert({
           user_id: user?.id,
-          name: extractedRequirements.activityName || formData.name || "Custom Activity",
-          description: extractedRequirements.activityDescription,
+          name: extractedRequirements.activityName || activityName,
+          description: extractedRequirements.activityDescription || description,
           status: "generated",
-          original_prompt: formData.prompt,
+          original_prompt: description,
           extracted_requirements: extractedRequirements,
         })
         .select()
@@ -147,19 +197,19 @@ const NewActivity = () => {
 
       if (error) throw error;
 
-      // Increment activity count
       await incrementActivityCount();
 
       toast({
-        title: "Activity Generated!",
-        description: "Your Custom Activity is ready. You can now review the code and deploy.",
+        title: "Activity Created!",
+        description: "Your Custom Activity is ready. Generate code to complete it.",
       });
+
       navigate(`/dashboard/activities/${activity.id}`);
     } catch (error: any) {
-      console.error("Save error:", error);
+      console.error("Create error:", error);
       toast({
-        title: "Failed to save",
-        description: error.message || "Failed to save activity. Please try again.",
+        title: "Failed to create",
+        description: error.message || "Failed to create activity. Please try again.",
         variant: "destructive",
       });
     } finally {
@@ -167,18 +217,35 @@ const NewActivity = () => {
     }
   };
 
-  const applyExample = (prompt: string) => {
-    setFormData({ ...formData, prompt });
+  const addOutcome = () => {
+    const newKey = `outcome_${outcomes.length + 1}`;
+    setOutcomes([...outcomes, { key: newKey, label: "", condition: "" }]);
+  };
+
+  const removeOutcome = (index: number) => {
+    if (outcomes.length > 2) {
+      setOutcomes(outcomes.filter((_, i) => i !== index));
+    }
+  };
+
+  const updateOutcome = (index: number, field: keyof Outcome, value: string) => {
+    const updated = [...outcomes];
+    updated[index] = { 
+      ...updated[index], 
+      [field]: value,
+      key: field === "label" ? value.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "") : updated[index].key
+    };
+    setOutcomes(updated);
   };
 
   return (
     <DashboardLayout>
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-3xl mx-auto">
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-2xl font-bold mb-2">Create New Activity</h1>
           <p className="text-muted-foreground">
-            Describe what you want your Custom Activity to do, and our AI will generate production-ready code.
+            Build a production-ready SFMC Custom Activity with AI assistance.
           </p>
         </div>
 
@@ -188,197 +255,222 @@ const NewActivity = () => {
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>
               {!canCreateActivity() ? (
-                <>You've reached your activity limit ({subscription?.plan === "free" ? "3" : "50"} activities). </>
+                <>Limit reached ({subscription?.plan === "free" ? "3" : "50"} activities). </>
               ) : (
-                <>You've used all your AI generations ({subscription?.plan === "free" ? "10" : "500"} generations). </>
+                <>AI generation limit reached. </>
               )}
               <Link to="/dashboard/settings/billing" className="underline font-medium">
-                Upgrade your plan
-              </Link>{" "}
-              to continue creating.
+                Upgrade plan
+              </Link>
             </AlertDescription>
           </Alert>
         )}
 
         {/* Progress Steps */}
-        <div className="flex items-center gap-4 mb-8">
-          {[
-            { num: 1, label: "Describe", key: "prompt" },
-            { num: 2, label: "Review", key: "review" },
-            { num: 3, label: "Generate", key: "generating" },
-          ].map((s, idx) => (
-            <div key={s.key} className="flex items-center gap-2">
+        <div className="flex items-center justify-between mb-8">
+          {steps.map((s, idx) => (
+            <div key={s.key} className="flex items-center">
               <div
-                className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-                  step === s.key
+                className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
+                  idx < currentStepIndex
                     ? "bg-primary text-primary-foreground"
-                    : (step === "review" && idx < 1)
-                    ? "bg-primary/20 text-primary"
+                    : idx === currentStepIndex
+                    ? "bg-primary text-primary-foreground ring-4 ring-primary/20"
                     : "bg-muted text-muted-foreground"
                 }`}
               >
-                {(step === "review" && idx === 0) || (step === "generating" && idx <= 1) ? (
-                  <Check className="h-4 w-4" />
-                ) : (
-                  s.num
-                )}
+                {idx < currentStepIndex ? <Check className="h-5 w-5" /> : <s.icon className="h-5 w-5" />}
               </div>
-              <span className={`text-sm ${step === s.key ? "text-foreground" : "text-muted-foreground"}`}>
-                {s.label}
-              </span>
-              {idx < 2 && <div className="w-16 h-px bg-border" />}
+              {idx < steps.length - 1 && (
+                <div className={`w-12 h-1 mx-2 rounded ${idx < currentStepIndex ? "bg-primary" : "bg-muted"}`} />
+              )}
             </div>
           ))}
         </div>
 
-        {/* Step 1: Prompt */}
-        {step === "prompt" && (
+        {/* Step 1: Choose Type */}
+        {step === "type" && (
           <div className="space-y-6">
-            {/* Activity Name */}
-            <div className="space-y-2">
-              <Label htmlFor="name">Activity Name (optional)</Label>
-              <Input
-                id="name"
-                placeholder="e.g., Slack Notifier, HubSpot Sync"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              />
-            </div>
-
-            {/* Main Prompt */}
-            <div className="space-y-2">
-              <Label htmlFor="prompt">Describe Your Activity</Label>
-              <div className="relative">
-                <Textarea
-                  id="prompt"
-                  placeholder="Describe in plain language what your Custom Activity should do. Include:
-• What data should come from Journey Builder
-• What external APIs to integrate
-• What should happen during execution
-• What configuration options users should see"
-                  className="min-h-[200px] resize-none"
-                  value={formData.prompt}
-                  onChange={(e) => setFormData({ ...formData, prompt: e.target.value })}
-                />
-                <div className="absolute bottom-3 right-3">
-                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <Sparkles className="h-3 w-3 text-primary" />
-                    <span>Powered by Lovable AI</span>
+            <h2 className="text-lg font-semibold">What type of activity do you want to create?</h2>
+            
+            <RadioGroup value={projectType} onValueChange={(v) => setProjectType(v as ProjectType)}>
+              <Card className={`cursor-pointer transition-all ${projectType === "custom-activity" ? "ring-2 ring-primary" : "hover:border-primary/50"}`}>
+                <CardHeader className="pb-3">
+                  <div className="flex items-start gap-4">
+                    <RadioGroupItem value="custom-activity" id="custom-activity" />
+                    <div className="flex-1">
+                      <CardTitle className="flex items-center gap-2 text-lg">
+                        <Zap className="h-5 w-5 text-primary" />
+                        Custom Activity
+                      </CardTitle>
+                      <CardDescription className="mt-1">
+                        Execute actions on contacts - send messages, call APIs, update data
+                      </CardDescription>
+                    </div>
                   </div>
+                </CardHeader>
+              </Card>
+
+              <Card className={`cursor-pointer transition-all ${projectType === "decision-split" ? "ring-2 ring-primary" : "hover:border-primary/50"}`}>
+                <CardHeader className="pb-3">
+                  <div className="flex items-start gap-4">
+                    <RadioGroupItem value="decision-split" id="decision-split" />
+                    <div className="flex-1">
+                      <CardTitle className="flex items-center gap-2 text-lg">
+                        <GitBranch className="h-5 w-5 text-primary" />
+                        Decision Split
+                      </CardTitle>
+                      <CardDescription className="mt-1">
+                        Route contacts to different paths based on API responses or conditions
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+              </Card>
+            </RadioGroup>
+
+            {/* Outcomes for Decision Split */}
+            {projectType === "decision-split" && (
+              <div className="space-y-4 pt-4 border-t">
+                <div className="flex items-center justify-between">
+                  <Label className="text-base">Define Outcomes (min. 2)</Label>
+                  <Button variant="outline" size="sm" onClick={addOutcome}>
+                    <Plus className="h-4 w-4 mr-1" /> Add Outcome
+                  </Button>
+                </div>
+                
+                <div className="space-y-3">
+                  {outcomes.map((outcome, idx) => (
+                    <div key={idx} className="flex items-center gap-3 p-3 rounded-lg bg-muted/50">
+                      <Input
+                        placeholder="Label (e.g., Yes, No, Maybe)"
+                        value={outcome.label}
+                        onChange={(e) => updateOutcome(idx, "label", e.target.value)}
+                        className="flex-1"
+                      />
+                      <Input
+                        placeholder="Condition description"
+                        value={outcome.condition}
+                        onChange={(e) => updateOutcome(idx, "condition", e.target.value)}
+                        className="flex-1"
+                      />
+                      {outcomes.length > 2 && (
+                        <Button variant="ghost" size="icon" onClick={() => removeOutcome(idx)}>
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </div>
-            </div>
-
-            {/* Tips */}
-            <div className="rounded-xl border border-border bg-card overflow-hidden">
-              <button
-                onClick={() => setShowTips(!showTips)}
-                className="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/30 transition-colors"
-              >
-                <div className="flex items-center gap-2">
-                  <Lightbulb className="h-4 w-4 text-primary" />
-                  <span className="font-medium text-sm">Tips for better results</span>
-                </div>
-                {showTips ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </button>
-              {showTips && (
-                <div className="px-4 pb-4 space-y-3">
-                  <ul className="text-sm text-muted-foreground space-y-2">
-                    <li className="flex items-start gap-2">
-                      <span className="text-primary">•</span>
-                      Be specific about the data you need from Journey Builder (email, name, custom attributes)
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <span className="text-primary">•</span>
-                      Mention authentication methods for external APIs (OAuth, API keys, webhooks)
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <span className="text-primary">•</span>
-                      Describe the configuration UI fields users should see
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <span className="text-primary">•</span>
-                      If it's a decision split, describe the possible outcomes
-                    </li>
-                  </ul>
-                </div>
-              )}
-            </div>
-
-            {/* Example Prompts */}
-            <div className="space-y-3">
-              <p className="text-sm font-medium">Try an example:</p>
-              <div className="grid grid-cols-2 gap-3">
-                {examplePrompts.map((example) => (
-                  <button
-                    key={example.title}
-                    onClick={() => applyExample(example.prompt)}
-                    className="text-left p-4 rounded-lg border border-border hover:border-primary/30 hover:bg-primary/5 transition-colors"
-                  >
-                    <p className="font-medium text-sm mb-1">{example.title}</p>
-                    <p className="text-xs text-muted-foreground line-clamp-2">
-                      {example.prompt}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Generate Button */}
-            <Button
-              variant="gradient"
-              size="xl"
-              className="w-full"
-              onClick={handleGenerate}
-              disabled={loading}
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  Analyzing...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="h-5 w-5" />
-                  Generate with AI
-                  <ArrowRight className="h-5 w-5" />
-                </>
-              )}
-            </Button>
+            )}
           </div>
         )}
 
-        {/* Step 2: Review Requirements */}
-        {step === "review" && extractedRequirements && (
+        {/* Step 2: Choose Stack */}
+        {step === "stack" && (
           <div className="space-y-6">
-            <div className="rounded-xl border border-border bg-card p-6">
-              <h3 className="font-semibold mb-4 flex items-center gap-2">
-                <Code2 className="h-5 w-5 text-primary" />
-                Extracted Requirements
-              </h3>
-              
-              <div className="space-y-4">
+            <h2 className="text-lg font-semibold">Choose your technology stack</h2>
+            
+            <RadioGroup value={stack} onValueChange={(v) => setStack(v as Stack)}>
+              <Card className={`cursor-pointer transition-all ${stack === "node" ? "ring-2 ring-primary" : "hover:border-primary/50"}`}>
+                <CardHeader className="pb-3">
+                  <div className="flex items-start gap-4">
+                    <RadioGroupItem value="node" id="node" />
+                    <div className="flex-1">
+                      <CardTitle className="flex items-center gap-2 text-lg">
+                        <Server className="h-5 w-5 text-green-500" />
+                        Node.js (Recommended)
+                      </CardTitle>
+                      <CardDescription className="mt-1">
+                        Express server for self-hosted deployments. Works with Vercel, Railway, Render.
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+              </Card>
+
+              <Card className={`cursor-not-allowed opacity-50`}>
+                <CardHeader className="pb-3">
+                  <div className="flex items-start gap-4">
+                    <RadioGroupItem value="ssjs" id="ssjs" disabled />
+                    <div className="flex-1">
+                      <CardTitle className="flex items-center gap-2 text-lg">
+                        <Code2 className="h-5 w-5 text-blue-500" />
+                        SSJS (Coming Soon)
+                      </CardTitle>
+                      <CardDescription className="mt-1">
+                        Server-Side JavaScript for CloudPages. No external hosting needed.
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+              </Card>
+            </RadioGroup>
+          </div>
+        )}
+
+        {/* Step 3: Describe */}
+        {step === "describe" && (
+          <div className="space-y-6">
+            <h2 className="text-lg font-semibold">Describe your activity</h2>
+            
+            <div className="space-y-4">
+              <div>
+                <Label htmlFor="name">Activity Name *</Label>
+                <Input
+                  id="name"
+                  placeholder="e.g., Slack Notifier, HubSpot Sync"
+                  value={activityName}
+                  onChange={(e) => setActivityName(e.target.value)}
+                  className="mt-1.5"
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="description">Description *</Label>
+                <Textarea
+                  id="description"
+                  placeholder={`Describe what your ${projectType === "decision-split" ? "decision split" : "custom activity"} should do. Include:
+• What data should come from Journey Builder
+• What external APIs to integrate  
+• What should happen during execution
+• What configuration options users need`}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="mt-1.5 min-h-[180px]"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Step 4: Configure - Review AI Output */}
+        {step === "configure" && extractedRequirements && (
+          <div className="space-y-6">
+            <h2 className="text-lg font-semibold">Review extracted requirements</h2>
+            
+            <Card>
+              <CardContent className="pt-6 space-y-4">
                 <div>
                   <Label className="text-xs text-muted-foreground">Activity Name</Label>
                   <p className="font-medium">{extractedRequirements.activityName}</p>
                 </div>
-                
+
                 <div>
                   <Label className="text-xs text-muted-foreground">Category</Label>
-                  <p className="font-medium capitalize">{extractedRequirements.category}</p>
+                  <p className="capitalize">{extractedRequirements.category}</p>
                 </div>
 
                 {extractedRequirements.inArguments?.length > 0 && (
                   <div>
-                    <Label className="text-xs text-muted-foreground mb-2 block">Input Arguments</Label>
-                    <div className="space-y-1">
-                      {extractedRequirements.inArguments.map((arg: any, idx: number) => (
-                        <div key={idx} className="flex items-center gap-2 text-sm">
-                          <span className="font-code text-primary">{arg.name}</span>
+                    <Label className="text-xs text-muted-foreground">Input Arguments</Label>
+                    <div className="mt-1 space-y-1">
+                      {extractedRequirements.inArguments.map((arg: any, i: number) => (
+                        <div key={i} className="flex items-center gap-2 text-sm">
+                          <code className="text-primary bg-primary/10 px-1.5 py-0.5 rounded">{arg.name}</code>
                           <span className="text-muted-foreground">({arg.type})</span>
-                          {arg.required && (
-                            <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">required</span>
-                          )}
+                          {arg.required && <span className="text-xs bg-muted px-1.5 py-0.5 rounded">required</span>}
                         </div>
                       ))}
                     </div>
@@ -387,13 +479,26 @@ const NewActivity = () => {
 
                 {extractedRequirements.externalAPIs?.length > 0 && (
                   <div>
-                    <Label className="text-xs text-muted-foreground mb-2 block">External APIs</Label>
-                    <div className="space-y-1">
-                      {extractedRequirements.externalAPIs.map((api: any, idx: number) => (
-                        <div key={idx} className="flex items-center gap-2 text-sm">
+                    <Label className="text-xs text-muted-foreground">External APIs</Label>
+                    <div className="mt-1 space-y-1">
+                      {extractedRequirements.externalAPIs.map((api: any, i: number) => (
+                        <div key={i} className="text-sm">
                           <span className="font-medium">{api.name}</span>
-                          <span className="text-muted-foreground">— {api.baseUrl || api.authentication}</span>
+                          <span className="text-muted-foreground"> — {api.authentication}</span>
                         </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {extractedRequirements.isDecisionSplit && extractedRequirements.outcomes && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Decision Outcomes</Label>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {extractedRequirements.outcomes.map((o: any, i: number) => (
+                        <span key={i} className="px-2 py-1 bg-primary/10 text-primary rounded-full text-sm">
+                          {o.label}
+                        </span>
                       ))}
                     </div>
                   </div>
@@ -401,70 +506,148 @@ const NewActivity = () => {
 
                 {extractedRequirements.executionSteps?.length > 0 && (
                   <div>
-                    <Label className="text-xs text-muted-foreground mb-2 block">Execution Steps</Label>
-                    <div className="space-y-2">
+                    <Label className="text-xs text-muted-foreground">Execution Steps</Label>
+                    <ol className="mt-1 space-y-2 text-sm">
                       {extractedRequirements.executionSteps.map((step: any) => (
-                        <div key={step.order} className="flex items-start gap-3 text-sm">
+                        <li key={step.order} className="flex gap-2">
                           <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center flex-shrink-0">
                             {step.order}
                           </span>
-                          <div>
-                            <p className="font-medium">{step.action}</p>
-                            <p className="text-muted-foreground">{step.details}</p>
-                          </div>
-                        </div>
+                          <span>{step.action}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                Review the extracted requirements above. The AI will use these to generate production-ready code.
+              </AlertDescription>
+            </Alert>
+          </div>
+        )}
+
+        {/* Step 5: Review */}
+        {step === "review" && (
+          <div className="space-y-6">
+            <h2 className="text-lg font-semibold">Review and create</h2>
+            
+            <Card>
+              <CardContent className="pt-6 space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Type</Label>
+                    <p className="font-medium flex items-center gap-2">
+                      {projectType === "decision-split" ? (
+                        <><GitBranch className="h-4 w-4" /> Decision Split</>
+                      ) : (
+                        <><Zap className="h-4 w-4" /> Custom Activity</>
+                      )}
+                    </p>
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Stack</Label>
+                    <p className="font-medium flex items-center gap-2">
+                      <Server className="h-4 w-4" /> {stack === "node" ? "Node.js" : "SSJS"}
+                    </p>
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-muted-foreground">Activity Name</Label>
+                  <p className="font-medium">{extractedRequirements?.activityName || activityName}</p>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-muted-foreground">Description</Label>
+                  <p className="text-sm text-muted-foreground">{extractedRequirements?.activityDescription || description}</p>
+                </div>
+
+                {projectType === "decision-split" && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Outcomes</Label>
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {(extractedRequirements?.outcomes || outcomes).map((o: any, i: number) => (
+                        <span key={i} className="px-2 py-1 bg-primary/10 text-primary rounded-full text-sm">
+                          {o.label}
+                        </span>
                       ))}
                     </div>
                   </div>
                 )}
+              </CardContent>
+            </Card>
 
-                <div className="flex items-center gap-2 pt-2">
-                  <span className="text-sm text-muted-foreground">Decision Split:</span>
-                  <span className={`text-sm font-medium ${extractedRequirements.isDecisionSplit ? "text-primary" : "text-muted-foreground"}`}>
-                    {extractedRequirements.isDecisionSplit ? "Yes" : "No"}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <Button variant="outline" onClick={() => setStep("prompt")} className="flex-1">
-                Back to Edit
-              </Button>
-              <Button variant="gradient" onClick={handleConfirmAndGenerate} disabled={loading} className="flex-1">
-                {loading ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  <>
-                    <Code2 className="h-4 w-4" />
-                    Save Activity
-                  </>
-                )}
-              </Button>
-            </div>
+            {validationErrors.length > 0 && (
+              <Alert variant="destructive">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
+                  <ul className="list-disc ml-4">
+                    {validationErrors.map((err, i) => (
+                      <li key={i}>{err}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
           </div>
         )}
 
-        {/* Step 3: Generating */}
-        {step === "generating" && loading && (
+        {/* Generating State */}
+        {step === "generating" && (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="relative mb-8">
-              <div className="w-20 h-20 rounded-2xl bg-gradient-primary flex items-center justify-center animate-pulse">
+              <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center animate-pulse">
                 <Sparkles className="h-10 w-10 text-primary-foreground" />
               </div>
-              <div className="absolute -inset-4 bg-gradient-primary opacity-20 blur-xl rounded-full animate-glow-pulse" />
             </div>
-            <h3 className="text-xl font-semibold mb-2">Analyzing your requirements...</h3>
-            <p className="text-muted-foreground mb-4">
-              AI is extracting structured requirements from your description
+            <h3 className="text-xl font-semibold mb-2">Extracting Requirements...</h3>
+            <p className="text-muted-foreground">
+              AI is analyzing your description and building the activity specification.
             </p>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              This usually takes 10-30 seconds
-            </div>
+          </div>
+        )}
+
+        {/* Navigation */}
+        {step !== "generating" && (
+          <div className="flex justify-between mt-8 pt-6 border-t">
+            <Button
+              variant="outline"
+              onClick={handleBack}
+              disabled={step === "type" || loading}
+            >
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back
+            </Button>
+
+            <Button
+              variant="gradient"
+              onClick={handleNext}
+              disabled={loading || (!canCreateActivity() && step === "review") || (!canGenerateAI() && step === "describe")}
+            >
+              {loading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : step === "review" ? (
+                <>
+                  Create Activity
+                  <Check className="h-4 w-4 ml-2" />
+                </>
+              ) : step === "describe" ? (
+                <>
+                  Generate Requirements
+                  <Sparkles className="h-4 w-4 ml-2" />
+                </>
+              ) : (
+                <>
+                  Continue
+                  <ArrowRight className="h-4 w-4 ml-2" />
+                </>
+              )}
+            </Button>
           </div>
         )}
       </div>
@@ -472,4 +655,4 @@ const NewActivity = () => {
   );
 };
 
-export default NewActivity;
+export default NewActivityWizard;
