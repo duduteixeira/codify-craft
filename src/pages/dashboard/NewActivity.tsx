@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
+import { useSubscription } from "@/hooks/useSubscription";
 import DashboardLayout from "@/components/dashboard/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Sparkles,
   ArrowRight,
@@ -16,6 +18,7 @@ import {
   Loader2,
   ChevronDown,
   ChevronUp,
+  AlertTriangle,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -42,6 +45,16 @@ const NewActivity = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { toast } = useToast();
+  const { 
+    canCreateActivity, 
+    canGenerateAI, 
+    getRemainingActivities, 
+    getRemainingGenerations,
+    incrementActivityCount,
+    incrementGenerationCount,
+    subscription,
+    loading: subscriptionLoading,
+  } = useSubscription();
   const [step, setStep] = useState<"prompt" | "review" | "generating">("prompt");
   const [loading, setLoading] = useState(false);
   const [showTips, setShowTips] = useState(true);
@@ -56,6 +69,24 @@ const NewActivity = () => {
       toast({
         title: "Prompt required",
         description: "Please describe what your Custom Activity should do.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!canCreateActivity()) {
+      toast({
+        title: "Limit reached",
+        description: "You've reached your activity limit. Please upgrade your plan.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!canGenerateAI()) {
+      toast({
+        title: "Generation limit reached",
+        description: "You've used all your AI generations. Please upgrade your plan.",
         variant: "destructive",
       });
       return;
@@ -77,6 +108,9 @@ const NewActivity = () => {
       if (data.error) {
         throw new Error(data.error);
       }
+
+      // Increment generation count
+      await incrementGenerationCount();
 
       setExtractedRequirements(data.requirements);
       setStep("review");
@@ -113,6 +147,9 @@ const NewActivity = () => {
 
       if (error) throw error;
 
+      // Increment activity count
+      await incrementActivityCount();
+
       toast({
         title: "Activity Generated!",
         description: "Your Custom Activity is ready. You can now review the code and deploy.",
@@ -144,6 +181,24 @@ const NewActivity = () => {
             Describe what you want your Custom Activity to do, and our AI will generate production-ready code.
           </p>
         </div>
+
+        {/* Limit Warnings */}
+        {!subscriptionLoading && (!canCreateActivity() || !canGenerateAI()) && (
+          <Alert variant="destructive" className="mb-6">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>
+              {!canCreateActivity() ? (
+                <>You've reached your activity limit ({subscription?.plan === "free" ? "3" : "50"} activities). </>
+              ) : (
+                <>You've used all your AI generations ({subscription?.plan === "free" ? "10" : "500"} generations). </>
+              )}
+              <Link to="/dashboard/settings/billing" className="underline font-medium">
+                Upgrade your plan
+              </Link>{" "}
+              to continue creating.
+            </AlertDescription>
+          </Alert>
+        )}
 
         {/* Progress Steps */}
         <div className="flex items-center gap-4 mb-8">
